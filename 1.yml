@@ -1,0 +1,120 @@
+---
+- name: Install Nginx Ingress Controller
+  hosts: localhost
+  become: yes
+  tasks:
+    - name: Create ingress-nginx namespace
+      shell: kubectl create namespace ingress-nginx
+      ignore_errors: yes
+
+    - name: Add ingress-nginx repository
+      shell: helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+      ignore_errors: yes
+
+    - name: Update Helm repositories
+      shell: helm repo update
+      ignore_errors: yes
+
+    - name: Install Nginx Ingress Controller
+      shell: helm install nginx-ingress ingress-nginx/ingress-nginx --namespace ingress-nginx --set controller.service.type=LoadBalancer
+      ignore_errors: yes
+
+- name: Install Prometheus and Grafana
+  hosts: localhost
+  become: yes
+  tasks:
+    - name: Create monitoring namespace
+      shell: kubectl create namespace monitoring
+      ignore_errors: yes
+
+    - name: Add Prometheus repository
+      shell: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      ignore_errors: yes
+
+    - name: Add Grafana repository
+      shell: helm repo add grafana https://grafana.github.io/helm-charts
+      ignore_errors: yes
+
+    - name: Update Helm repositories
+      shell: helm repo update
+      ignore_errors: yes
+
+    - name: Check if Prometheus is already installed
+      shell: helm list -n monitoring | grep prometheus
+      register: prometheus_installed
+      ignore_errors: yes
+
+    - name: Uninstall existing Prometheus
+      shell: helm uninstall prometheus --namespace monitoring
+      when: prometheus_installed.rc == 0
+      ignore_errors: yes
+
+    - name: Install Prometheus
+      shell: helm install prometheus prometheus-community/prometheus --namespace monitoring --set server.service.type=ClusterIP
+      retries: 3
+      delay: 10
+      register: prometheus_install_result
+      until: prometheus_install_result.rc == 0
+      ignore_errors: yes
+
+    - name: Check if Grafana is already installed
+      shell: helm list -n monitoring | grep grafana
+      register: grafana_installed
+      ignore_errors: yes
+
+    - name: Uninstall existing Grafana
+      shell: helm uninstall grafana --namespace monitoring
+      when: grafana_installed.rc == 0
+      ignore_errors: yes
+
+    - name: Install Grafana
+      shell: helm install grafana grafana/grafana --namespace monitoring --set adminPassword=admin --set service.type=ClusterIP
+      retries: 3
+      delay: 10
+      register: grafana_install_result
+      until: grafana_install_result.rc == 0
+      ignore_errors: yes
+
+    - name: Create Ingress resource for Prometheus and Grafana
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: monitoring-ingress
+          namespace: monitoring
+          annotations:
+            nginx.ingress.kubernetes.io/rewrite-target: /
+        spec:
+          rules:
+            - http:
+                paths:
+                  - path: /prometheus
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: prometheus-server
+                        port:
+                          number: 80
+                  - path: /grafana
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: grafana
+                        port:
+                          number: 80
+        EOF
+      ignore_errors: yes
+
+    - name: Get Nginx Ingress Controller external IP
+      shell: kubectl get svc --namespace ingress-nginx nginx-ingress-ingress-nginx-controller -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
+      register: ingress_controller_ip
+      retries: 3
+      delay: 10
+      until: ingress_controller_ip.rc == 0
+      ignore_errors: yes
+
+    - name: Print Nginx Ingress Controller IP
+      debug:
+        msg: "Monitoring services are available at: http://{{ ingress_controller_ip.stdout }}/prometheus and http://{{ ingress_controller_ip.stdout }}/grafana"
+      when: ingress_controller_ip.rc == 0
